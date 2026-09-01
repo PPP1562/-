@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Расчётная лента" />
+<title>Расчётная лента</title>
+<link rel="apple-touch-icon" href="icon.png" />
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,wght@0,400;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+  html, body { margin:0; padding:0; background:#EDE7DA; }
+  * { box-sizing: border-box; }
+  input:focus { outline: none; }
+  .receipt-input {
+    background: transparent; border: none; border-bottom: 1px solid #C9C0B2;
+    font-family: 'IBM Plex Mono', monospace; font-size: 14px; padding: 6px 2px;
+    color: #241F19; width: 100%;
+  }
+  .receipt-input:focus { border-bottom: 1px solid #B4392C; }
+  .btn-stamp {
+    font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.02em;
+    border: 1px solid #241F19; background: transparent; color: #241F19;
+    padding: 9px 14px; cursor: pointer; transition: background 0.15s, color 0.15s;
+  }
+  .btn-stamp:hover { background: #241F19; color: #EDE7DA; }
+  .btn-stamp.primary { border-color: #4C6B4F; color: #4C6B4F; }
+  .btn-stamp.primary:hover { background: #4C6B4F; color: #F2EDE4; }
+  .btn-stamp.amber { border-color: #9C6B2E; color: #9C6B2E; }
+  .btn-stamp.amber:hover { background: #9C6B2E; color: #F2EDE4; }
+  .tab { font-family: 'IBM Plex Mono', monospace; font-size: 12px; padding: 6px 10px; cursor: pointer; border-bottom: 2px solid transparent; color: #8a8072; }
+  .tab.active { color: #241F19; border-bottom-color: #B4392C; }
+  .del-x { font-family: 'IBM Plex Mono', monospace; color: #C9C0B2; cursor: pointer; font-size: 13px; background: none; border: none; padding: 0 4px; }
+  .del-x:hover { color: #B4392C; }
+</style>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/recharts@2.12.0/umd/Recharts.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo } = React;
+const { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } = Recharts;
+
+const DEFAULT_RATE = 10.5;
+const DEFAULT_THRESHOLD = 40000;
+const DEFAULT_BONUS = 1000;
+
+function pad(n) { return String(n).padStart(2, "0"); }
+function todayISO() { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; }
+function formatRUB(n) { const sign = n < 0 ? "-" : ""; return sign + Math.round(Math.abs(n)).toLocaleString("ru-RU") + "₽"; }
+function formatDateShort(iso) { const [y,m,d] = iso.split("-"); return `${d}.${m}.${String(y).slice(2)}`; }
+function monthKey(iso) { const [y,m] = iso.split("-"); return `${y}-${m}`; }
+const MONTH_NAMES = ["январь","февраль","март","апрель","май","июнь","июль","август","сентябрь","октябрь","ноябрь","декабрь"];
+const MONTH_NAMES_SHORT = ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"];
+function monthLabel(key) { const [y,m] = key.split("-"); return `${MONTH_NAMES[parseInt(m,10)-1]} ${y}`; }
+function monthLabelShort(key) { const [y,m] = key.split("-"); return `${MONTH_NAMES_SHORT[parseInt(m,10)-1]} ${String(y).slice(2)}`; }
+function daysInMonth(key) { const [y,m] = key.split("-"); return new Date(parseInt(y), parseInt(m), 0).getDate(); }
+
+// --- local storage (replaces window.storage from the Claude artifact version) ---
+const store = {
+  get(key, fallback) { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch(e) { return fallback; } },
+  set(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch(e) { console.error(e); } }
+};
+
+function SalaryTracker() {
+  const [entries, setEntries] = useState(() => store.get("shift-entries", []));
+  const [advances, setAdvances] = useState(() => store.get("advance-entries", []));
+  const [settings, setSettingsState] = useState(() => store.get("shift-settings", { rate: DEFAULT_RATE, threshold: DEFAULT_THRESHOLD, bonusAmount: DEFAULT_BONUS }));
+  const { rate, threshold, bonusAmount } = settings;
+  const [showSettings, setShowSettings] = useState(false);
+
+  const [date, setDate] = useState(todayISO());
+  const [cash, setCash] = useState("");
+  const [noBonus, setNoBonus] = useState(false);
+
+  const [advDate, setAdvDate] = useState(todayISO());
+  const [advAmount, setAdvAmount] = useState("");
+  const [showAdvForm, setShowAdvForm] = useState(false);
+
+  const [activeMonth, setActiveMonth] = useState(monthKey(todayISO()));
+  const [view, setView] = useState("month");
+
+  useEffect(() => { store.set("shift-entries", entries); }, [entries]);
+  useEffect(() => { store.set("advance-entries", advances); }, [advances]);
+  useEffect(() => { store.set("shift-settings", settings); }, [settings]);
+
+  function calcCommission(cashVal) { return (cashVal * rate) / 100; }
+  function calcBonus(cashVal, manualNoBonus) { if (manualNoBonus) return 0; return cashVal > threshold ? bonusAmount : 0; }
+
+  function addEntry() {
+    const cashVal = parseFloat(cash.replace(/\s/g, "").replace(",", "."));
+    if (!date || isNaN(cashVal) || cashVal <= 0) return;
+    const entry = { id: Date.now().toString(36)+Math.random().toString(36).slice(2,6), date, cash: cashVal,
+      commission: calcCommission(cashVal), bonus: calcBonus(cashVal, noBonus), manualNoBonus: noBonus };
+    setEntries(prev => [...prev, entry].sort((a,b)=>a.date.localeCompare(b.date)));
+    setCash(""); setNoBonus(false); setActiveMonth(monthKey(date)); setView("month");
+  }
+  function removeEntry(id) { setEntries(prev => prev.filter(e => e.id !== id)); }
+
+  function addAdvance() {
+    const val = parseFloat(advAmount.replace(/\s/g, "").replace(",", "."));
+    if (!advDate || isNaN(val) || val <= 0) return;
+    const adv = { id: Date.now().toString(36)+Math.random().toString(36).slice(2,6), date: advDate, amount: val };
+    setAdvances(prev => [...prev, adv].sort((a,b)=>a.date.localeCompare(b.date)));
+    setAdvAmount(""); setShowAdvForm(false);
+  }
+  function removeAdvance(id) { setAdvances(prev => prev.filter(a => a.id !== id)); }
+
+  function recalcAll(newSettings) {
+    setEntries(prev => prev.map(e => ({
+      ...e,
+      commission: (e.cash * newSettings.rate) / 100,
+      bonus: e.manualNoBonus ? 0 : (e.cash > newSettings.threshold ? newSettings.bonusAmount : 0),
+    })));
+  }
+  function updateSetting(key, value) {
+    const next = { ...settings, [key]: value };
+    setSettingsState(next);
+  }
+  function commitSettings() { recalcAll(settings); }
+
+  const months = useMemo(() => {
+    const keys = new Set([...entries.map(e=>monthKey(e.date)), ...advances.map(a=>monthKey(a.date))]);
+    const arr = Array.from(keys); arr.sort();
+    if (arr.length === 0) arr.push(monthKey(todayISO()));
+    return arr;
+  }, [entries, advances]);
+
+  useEffect(() => { if (!months.includes(activeMonth) && months.length>0) setActiveMonth(months[months.length-1]); }, [months]);
+
+  const monthEntries = entries.filter(e => monthKey(e.date) === activeMonth);
+  const monthAdvances = advances.filter(a => monthKey(a.date) === activeMonth);
+  const firstHalf = monthEntries.filter(e => parseInt(e.date.split("-")[2],10) <= 15);
+  const secondHalf = monthEntries.filter(e => parseInt(e.date.split("-")[2],10) > 15);
+  const advFirst = monthAdvances.filter(a => parseInt(a.date.split("-")[2],10) <= 15);
+  const advSecond = monthAdvances.filter(a => parseInt(a.date.split("-")[2],10) > 15);
+
+  function sumPeriod(list) { return list.reduce((acc,e)=>acc+e.commission+e.bonus,0); }
+  function sumAdv(list) { return list.reduce((acc,a)=>acc+a.amount,0); }
+
+  const earnedFirst = sumPeriod(firstHalf), earnedSecond = sumPeriod(secondHalf);
+  const advTotalFirst = sumAdv(advFirst), advTotalSecond = sumAdv(advSecond);
+  const earnedMonth = earnedFirst + earnedSecond;
+  const advTotalMonth = advTotalFirst + advTotalSecond;
+  const netMonth = earnedMonth - advTotalMonth;
+
+  const compareData = useMemo(() => months.map(m => {
+    const es = entries.filter(e=>monthKey(e.date)===m);
+    const as = advances.filter(a=>monthKey(a.date)===m);
+    const earned = sumPeriod(es), adv = sumAdv(as);
+    return { month: m, label: monthLabelShort(m), earned, adv, net: earned-adv };
+  }), [entries, advances, months]);
+
+  const fontSerif = "'Source Serif 4', Georgia, serif";
+  const fontMono = "'IBM Plex Mono', 'Courier New', monospace";
+
+  return (
+    <div style={{ minHeight:"100vh", background:"#EDE7DA", padding:"32px 12px", fontFamily:fontSerif, color:"#241F19" }}>
+      <div style={{ maxWidth:440, margin:"0 auto" }}>
+        <div style={{ textAlign:"center", marginBottom:4 }}>
+          <div style={{ fontSize:12, letterSpacing:"0.08em", color:"#8a8072", fontFamily:fontMono, marginBottom:6 }}>учёт смен</div>
+          <h1 style={{ fontSize:28, fontWeight:700, margin:0, fontStyle:"italic" }}>Расчётная лента</h1>
+        </div>
+
+        <div style={{ display:"flex", justifyContent:"center", gap:6, marginTop:18, marginBottom:4 }}>
+          <div className={`tab ${view==="month"?"active":""}`} onClick={()=>setView("month")}>по месяцу</div>
+          <div className={`tab ${view==="compare"?"active":""}`} onClick={()=>setView("compare")}>сравнение</div>
+        </div>
+
+        <div style={{ background:"#F7F3EA", marginTop:16, boxShadow:"0 1px 0 #C9C0B2, 0 18px 40px -20px rgba(36,31,25,0.35)", position:"relative" }}>
+          <div style={{ height:10, backgroundImage:"radial-gradient(circle at 8px 5px, #EDE7DA 4px, transparent 4.5px)", backgroundSize:"16px 10px", backgroundColor:"#F7F3EA" }} />
+
+          {view === "compare" ? (
+            <div style={{ padding:"20px 20px 28px" }}>
+              <div style={{ fontFamily:fontMono, fontSize:11, color:"#8a8072", letterSpacing:"0.05em", marginBottom:14 }}>К ВЫПЛАТЕ ПО МЕСЯЦАМ</div>
+              <div style={{ width:"100%", height:220 }}>
+                <ResponsiveContainer>
+                  <BarChart data={compareData} margin={{ top:4, right:4, left:-18, bottom:0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#DDD5C4" vertical={false} />
+                    <XAxis dataKey="label" tick={{ fontFamily:"IBM Plex Mono", fontSize:11, fill:"#8a8072" }} axisLine={{ stroke:"#C9C0B2" }} tickLine={false} />
+                    <YAxis tick={{ fontFamily:"IBM Plex Mono", fontSize:10, fill:"#8a8072" }} axisLine={false} tickLine={false} width={54} tickFormatter={(v)=> (v/1000)+"k"} />
+                    <Tooltip formatter={(value)=>[formatRUB(value), "к выплате"]} labelStyle={{ fontFamily:"IBM Plex Mono", color:"#241F19" }} contentStyle={{ fontFamily:"IBM Plex Mono", fontSize:12, background:"#F7F3EA", border:"1px solid #C9C0B2" }} />
+                    <Bar dataKey="net" radius={[2,2,0,0]}>
+                      {compareData.map((d,i)=>(<Cell key={i} fill={d.month===activeMonth?"#B4392C":"#4C6B4F"} />))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              <div style={{ marginTop:16 }}>
+                {compareData.slice().reverse().map(d => (
+                  <div key={d.month} onClick={()=>{ setActiveMonth(d.month); setView("month"); }}
+                    style={{ display:"flex", justifyContent:"space-between", fontFamily:fontMono, fontSize:13, padding:"7px 0", borderBottom:"1px dotted #DDD5C4", cursor:"pointer" }}>
+                    <span style={{ color:"#8a8072" }}>{monthLabel(d.month)}</span>
+                    <span style={{ display:"flex", gap:14 }}>
+                      {d.adv>0 && <span style={{ color:"#9C6B2E" }}>аванс -{formatRUB(d.adv)}</span>}
+                      <span style={{ fontWeight:600 }}>{formatRUB(d.net)}</span>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div style={{ padding:"8px 24px 24px" }}>
+              <div style={{ display:"flex", gap:4, borderBottom:"1px solid #C9C0B2", marginBottom:18, flexWrap:"wrap" }}>
+                {months.map(m => (<div key={m} className={`tab ${m===activeMonth?"active":""}`} onClick={()=>setActiveMonth(m)}>{monthLabel(m)}</div>))}
+                <div style={{ marginLeft:"auto" }}>
+                  <span className="tab" style={{ color: showSettings?"#B4392C":"#8a8072" }} onClick={()=>setShowSettings(s=>!s)}>⚙ настройки</span>
+                </div>
+              </div>
+
+              {showSettings && (
+                <div style={{ marginBottom:20, padding:"14px 16px", background:"#EDE7DA", fontFamily:fontMono, fontSize:13 }}>
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+                    <span style={{ color:"#8a8072" }}>% с кассы</span>
+                    <input type="number" step="0.1" value={rate} onChange={e=>updateSetting("rate", parseFloat(e.target.value)||0)} onBlur={commitSettings}
+                      style={{ width:70, textAlign:"right", background:"transparent", border:"none", borderBottom:"1px solid #C9C0B2", fontFamily:fontMono, fontSize:13, color:"#241F19" }} />
+                  </div>
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+                    <span style={{ color:"#8a8072" }}>порог бонуса, ₽</span>
+                    <input type="number" value={threshold} onChange={e=>updateSetting("threshold", parseFloat(e.target.value)||0)} onBlur={commitSettings}
+                      style={{ width:90, textAlign:"right", background:"transparent", border:"none", borderBottom:"1px solid #C9C0B2", fontFamily:fontMono, fontSize:13, color:"#241F19" }} />
+                  </div>
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                    <span style={{ color:"#8a8072" }}>сумма бонуса, ₽</span>
+                    <input type="number" value={bonusAmount} onChange={e=>updateSetting("bonusAmount", parseFloat(e.target.value)||0)} onBlur={commitSettings}
+                      style={{ width:70, textAlign:"right", background:"transparent", border:"none", borderBottom:"1px solid #C9C0B2", fontFamily:fontMono, fontSize:13, color:"#241F19" }} />
+                  </div>
+                </div>
+              )}
+
+              <div style={{ display:"flex", gap:10, marginBottom:8, alignItems:"flex-end" }}>
+                <div style={{ flex:"0 0 118px" }}>
+                  <div style={{ fontSize:10, color:"#8a8072", fontFamily:fontMono, marginBottom:2 }}>дата</div>
+                  <input type="date" className="receipt-input" value={date} onChange={e=>setDate(e.target.value)} />
+                </div>
+                <div style={{ flex:1 }}>
+                  <div style={{ fontSize:10, color:"#8a8072", fontFamily:fontMono, marginBottom:2 }}>касса, ₽</div>
+                  <input type="text" inputMode="decimal" placeholder="0" className="receipt-input" value={cash}
+                    onChange={e=>setCash(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter") addEntry(); }} />
+                </div>
+              </div>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+                <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:11, color:"#8a8072", fontFamily:fontMono, cursor:"pointer" }}>
+                  <input type="checkbox" checked={noBonus} onChange={e=>setNoBonus(e.target.checked)} /> без бонуса
+                </label>
+                <button className="btn-stamp primary" onClick={addEntry}>+ смена</button>
+              </div>
+              {cash && !isNaN(parseFloat(cash.replace(",", "."))) && (
+                <div style={{ fontFamily:fontMono, fontSize:11, color:"#8a8072", marginBottom:12, marginTop:-2 }}>
+                  → {formatRUB(calcCommission(parseFloat(cash.replace(",", "."))))}
+                  {calcBonus(parseFloat(cash.replace(",", ".")), noBonus)>0 ? ` + ${formatRUB(bonusAmount)} бонус` : ""}
+                </div>
+              )}
+
+              <div style={{ marginBottom:18 }}>
+                {!showAdvForm ? (
+                  <button className="btn-stamp amber" onClick={()=>setShowAdvForm(true)} style={{ width:"100%" }}>+ взял аванс</button>
+                ) : (
+                  <div style={{ padding:"12px 14px", background:"#F1E9D8", border:"1px dashed #C9A971" }}>
+                    <div style={{ display:"flex", gap:10, marginBottom:10, alignItems:"flex-end" }}>
+                      <div style={{ flex:"0 0 118px" }}>
+                        <div style={{ fontSize:10, color:"#9C6B2E", fontFamily:fontMono, marginBottom:2 }}>дата</div>
+                        <input type="date" className="receipt-input" value={advDate} onChange={e=>setAdvDate(e.target.value)} />
+                      </div>
+                      <div style={{ flex:1 }}>
+                        <div style={{ fontSize:10, color:"#9C6B2E", fontFamily:fontMono, marginBottom:2 }}>сумма, ₽</div>
+                        <input type="text" inputMode="decimal" placeholder="0" className="receipt-input" value={advAmount}
+                          onChange={e=>setAdvAmount(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter") addAdvance(); }} />
+                      </div>
+                    </div>
+                    <div style={{ display:"flex", justifyContent:"flex-end", gap:8 }}>
+                      <button className="btn-stamp" onClick={()=>{ setShowAdvForm(false); setAdvAmount(""); }}>отмена</button>
+                      <button className="btn-stamp amber" onClick={addAdvance}>записать аванс</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <PeriodBlock title="1 — 15" entries={firstHalf} advances={advFirst} earned={earnedFirst} advTotal={advTotalFirst} onRemove={removeEntry} onRemoveAdv={removeAdvance} fontMono={fontMono} />
+              <PeriodBlock title={`16 — ${daysInMonth(activeMonth)}`} entries={secondHalf} advances={advSecond} earned={earnedSecond} advTotal={advTotalSecond} onRemove={removeEntry} onRemoveAdv={removeAdvance} fontMono={fontMono} />
+
+              <div style={{ borderTop:"2px dashed #C9C0B2", marginTop:8, paddingTop:14 }}>
+                <div style={{ display:"flex", justifyContent:"space-between", fontFamily:fontMono, fontSize:12, color:"#8a8072", marginBottom:4 }}>
+                  <span>начислено</span><span>{formatRUB(earnedMonth)}</span>
+                </div>
+                {advTotalMonth>0 && (
+                  <div style={{ display:"flex", justifyContent:"space-between", fontFamily:fontMono, fontSize:12, color:"#9C6B2E", marginBottom:4 }}>
+                    <span>аванс</span><span>-{formatRUB(advTotalMonth)}</span>
+                  </div>
+                )}
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginTop:6 }}>
+                  <span style={{ fontFamily:fontMono, fontSize:13, letterSpacing:"0.04em" }}>К ВЫПЛАТЕ</span>
+                  <span style={{ fontFamily:fontMono, fontSize:20, fontWeight:600 }}>{formatRUB(netMonth)}</span>
+                </div>
+              </div>
+            </div>
+          )}
+          <div style={{ height:10, backgroundImage:"radial-gradient(circle at 8px 5px, #EDE7DA 4px, transparent 4.5px)", backgroundSize:"16px 10px", backgroundColor:"#F7F3EA" }} />
+        </div>
+        <div style={{ textAlign:"center", marginTop:14, fontFamily:fontMono, fontSize:11, color:"#8a8072" }}>сохранено на устройстве</div>
+      </div>
+    </div>
+  );
+}
+
+function PeriodBlock({ title, entries, advances, earned, advTotal, onRemove, onRemoveAdv, fontMono }) {
+  return (
+    <div style={{ marginBottom:18 }}>
+      <div style={{ fontFamily:fontMono, fontSize:11, color:"#8a8072", letterSpacing:"0.05em", marginBottom:8 }}>{title}</div>
+      {entries.length===0 && advances.length===0 ? (
+        <div style={{ fontFamily:fontMono, fontSize:12, color:"#C9C0B2", paddingBottom:6 }}>— пусто —</div>
+      ) : (
+        <>
+          {entries.map(e => (
+            <div key={e.id} style={{ display:"flex", alignItems:"baseline", fontFamily:fontMono, fontSize:13, padding:"4px 0", borderBottom:"1px dotted #DDD5C4" }}>
+              <span style={{ color:"#8a8072", width:56 }}>{formatDateShort(e.date)}</span>
+              <span style={{ color:"#8a8072", flex:1, textAlign:"right", marginRight:10 }}>{formatRUB(e.cash)}</span>
+              <span style={{ width:76, textAlign:"right" }}>{formatRUB(e.commission)}</span>
+              <span style={{ width:60, textAlign:"right", color: e.bonus>0 ? "#4C6B4F" : "#DDD5C4" }}>{e.bonus>0 ? `+${formatRUB(e.bonus)}` : "—"}</span>
+              <button className="del-x" onClick={()=>onRemove(e.id)}>✕</button>
+            </div>
+          ))}
+          {advances.map(a => (
+            <div key={a.id} style={{ display:"flex", alignItems:"baseline", fontFamily:fontMono, fontSize:13, padding:"4px 0", borderBottom:"1px dotted #DDD5C4", color:"#9C6B2E" }}>
+              <span style={{ width:56 }}>{formatDateShort(a.date)}</span>
+              <span style={{ flex:1 }}>аванс</span>
+              <span style={{ minWidth:76, textAlign:"right" }}>-{formatRUB(a.amount)}</span>
+              <button className="del-x" onClick={()=>onRemoveAdv(a.id)} style={{ color:"#DDBF9A" }}>✕</button>
+            </div>
+          ))}
+        </>
+      )}
+      <div style={{ display:"flex", justifyContent:"space-between", fontFamily:fontMono, fontSize:13, fontWeight:600, paddingTop:6 }}>
+        <span>подытог</span><span>{formatRUB(earned - advTotal)}</span>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<SalaryTracker />);
+</script>
+</body>
+</html>

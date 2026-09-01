@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Гроссбух" />
+<title>Гроссбух</title>
+<style> html, body { margin:0; padding:0; background:#EDE7DA; } </style>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo } = React;
+
+// localStorage-backed shim matching the shape of the Claude-artifact storage API,
+// so this component (originally written for window.storage) needs no other changes.
+const store = {
+  async get(key) {
+    try {
+      const v = localStorage.getItem(key);
+      return v !== null ? { key, value: v } : null;
+    } catch (e) { return null; }
+  },
+  async set(key, value) {
+    try {
+      localStorage.setItem(key, value);
+      return { key, value };
+    } catch (e) { return null; }
+  }
+};
+
+
+const DEFAULT_CATEGORIES = ["еда", "транспорт", "жильё", "связь", "здоровье", "развлечения", "другое"];
+
+function pad(n) { return String(n).padStart(2, "0"); }
+function todayISO() { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
+function formatRUB(n) { const sign = n < 0 ? "-" : ""; return sign + Math.round(Math.abs(n)).toLocaleString("ru-RU") + "₽"; }
+function formatDateShort(iso) { const [y, m, d] = iso.split("-"); return `${d}.${m}.${String(y).slice(2)}`; }
+function monthKey(iso) { const [y, m] = iso.split("-"); return `${y}-${m}`; }
+const MONTH_NAMES = ["январь","февраль","март","апрель","май","июнь","июль","август","сентябрь","октябрь","ноябрь","декабрь"];
+function monthLabel(key) { const [y, m] = key.split("-"); return `${MONTH_NAMES[parseInt(m, 10) - 1]} ${y}`; }
+function daysInMonth(key) { const [y, m] = key.split("-"); return new Date(parseInt(y), parseInt(m), 0).getDate(); }
+
+// Turns raw shift/advance records into dated cash-flow events:
+// - bonus: cash in hand the day of the shift
+// - advance: cash in hand the day it's taken
+// - commission: paid out in a lump sum on payday (15th / last day), net of advances taken that period
+function buildIncomeEvents(shiftEntries, advanceEntries, month) {
+  const events = [];
+  const monthShifts = shiftEntries.filter((e) => monthKey(e.date) === month);
+  const monthAdvances = advanceEntries.filter((a) => monthKey(a.date) === month);
+
+  monthShifts.forEach((e) => {
+    if (e.bonus > 0) events.push({ id: "bonus-" + e.id, date: e.date, kind: "bonus", label: "бонус за смену", amount: e.bonus });
+  });
+  monthAdvances.forEach((a) => {
+    events.push({ id: "adv-" + a.id, date: a.date, kind: "advance", label: "аванс (в счёт зарплаты)", amount: a.amount });
+  });
+
+  const day = (d) => parseInt(d.split("-")[2], 10);
+  const firstHalf = monthShifts.filter((e) => day(e.date) <= 15);
+  const secondHalf = monthShifts.filter((e) => day(e.date) > 15);
+  const advFirst = monthAdvances.filter((a) => day(a.date) <= 15);
+  const advSecond = monthAdvances.filter((a) => day(a.date) > 15);
+
+  const [y, m] = month.split("-");
+  const paydayFirst = `${y}-${m}-15`;
+  const paydaySecond = `${y}-${m}-${pad(daysInMonth(month))}`;
+
+  const commissionFirst = firstHalf.reduce((acc, e) => acc + (e.commission || 0), 0);
+  const commissionSecond = secondHalf.reduce((acc, e) => acc + (e.commission || 0), 0);
+  const advFirstTotal = advFirst.reduce((acc, a) => acc + a.amount, 0);
+  const advSecondTotal = advSecond.reduce((acc, a) => acc + a.amount, 0);
+
+  if (firstHalf.length > 0) events.push({ id: "payday-1-" + month, date: paydayFirst, kind: "payday", label: "зарплата · проценты 1–15", amount: commissionFirst - advFirstTotal });
+  if (secondHalf.length > 0) events.push({ id: "payday-2-" + month, date: paydaySecond, kind: "payday", label: "зарплата · проценты 16–конец", amount: commissionSecond - advSecondTotal });
+
+  return events;
+}
+
+function BudgetLedger() {
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  // income pulled from the salary tracker (shared storage keys)
+  const [shiftEntries, setShiftEntries] = useState([]);
+  const [advanceEntries, setAdvanceEntries] = useState([]);
+
+  // this app's own data
+  const [expenses, setExpenses] = useState([]);
+  const [otherIncome, setOtherIncome] = useState([]);
+  const [categories, setCategories] = useState(DEFAULT_CATEGORIES);
+
+  const [activeMonth, setActiveMonth] = useState(monthKey(todayISO()));
+  const [tab, setTab] = useState("expense"); // "expense" | "income"
+
+  const [date, setDate] = useState(todayISO());
+  const [amount, setAmount] = useState("");
+  const [category, setCategory] = useState(DEFAULT_CATEGORIES[0]);
+  const [note, setNote] = useState("");
+  const [newCatInput, setNewCatInput] = useState("");
+  const [addingCat, setAddingCat] = useState(false);
+
+  const [incDate, setIncDate] = useState(todayISO());
+  const [incAmount, setIncAmount] = useState("");
+  const [incLabel, setIncLabel] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      try { const r = await store.get("shift-entries"); if (r && r.value) setShiftEntries(JSON.parse(r.value)); } catch (e) {}
+      try { const r = await store.get("advance-entries"); if (r && r.value) setAdvanceEntries(JSON.parse(r.value)); } catch (e) {}
+      try { const r = await store.get("expense-entries"); if (r && r.value) setExpenses(JSON.parse(r.value)); } catch (e) {}
+      try { const r = await store.get("other-income-entries"); if (r && r.value) setOtherIncome(JSON.parse(r.value)); } catch (e) {}
+      try { const r = await store.get("expense-categories"); if (r && r.value) setCategories(JSON.parse(r.value)); } catch (e) {}
+      setLoaded(true);
+    })();
+  }, []);
+
+  async function persist(key, value, setter) {
+    setter(value);
+    setSaving(true);
+    try { await store.set(key, JSON.stringify(value)); } catch (e) { console.error(e); }
+    setSaving(false);
+  }
+
+  function addExpense() {
+    const val = parseFloat(amount.replace(/\s/g, "").replace(",", "."));
+    if (!date || isNaN(val) || val <= 0) return;
+    const entry = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), date, amount: val, category, note: note.trim() };
+    persist("expense-entries", [...expenses, entry].sort((a, b) => a.date.localeCompare(b.date)), setExpenses);
+    setAmount(""); setNote(""); setActiveMonth(monthKey(date));
+  }
+  function removeExpense(id) { persist("expense-entries", expenses.filter((e) => e.id !== id), setExpenses); }
+
+  function addOtherIncome() {
+    const val = parseFloat(incAmount.replace(/\s/g, "").replace(",", "."));
+    if (!incDate || isNaN(val) || val <= 0) return;
+    const entry = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), date: incDate, amount: val, label: incLabel.trim() || "доход" };
+    persist("other-income-entries", [...otherIncome, entry].sort((a, b) => a.date.localeCompare(b.date)), setOtherIncome);
+    setIncAmount(""); setIncLabel(""); setActiveMonth(monthKey(incDate));
+  }
+  function removeOtherIncome(id) { persist("other-income-entries", otherIncome.filter((e) => e.id !== id), setOtherIncome); }
+
+  function addCategory() {
+    const name = newCatInput.trim().toLowerCase();
+    if (!name || categories.includes(name)) { setNewCatInput(""); setAddingCat(false); return; }
+    persist("expense-categories", [...categories, name], setCategories);
+    setCategory(name);
+    setNewCatInput(""); setAddingCat(false);
+  }
+
+  const months = useMemo(() => {
+    const keys = new Set([
+      ...shiftEntries.map((e) => monthKey(e.date)),
+      ...advanceEntries.map((a) => monthKey(a.date)),
+      ...expenses.map((e) => monthKey(e.date)),
+      ...otherIncome.map((e) => monthKey(e.date)),
+    ]);
+    const arr = Array.from(keys); arr.sort();
+    if (arr.length === 0) arr.push(monthKey(todayISO()));
+    return arr;
+  }, [shiftEntries, advanceEntries, expenses, otherIncome]);
+
+  useEffect(() => { if (!months.includes(activeMonth) && months.length > 0) setActiveMonth(months[months.length - 1]); }, [months]);
+
+  const monthExpenses = expenses.filter((e) => monthKey(e.date) === activeMonth).sort((a,b)=>a.date.localeCompare(b.date));
+  const monthOtherIncome = otherIncome.filter((e) => monthKey(e.date) === activeMonth).sort((a,b)=>a.date.localeCompare(b.date));
+  const salaryEvents = useMemo(() => buildIncomeEvents(shiftEntries, advanceEntries, activeMonth), [shiftEntries, advanceEntries, activeMonth]);
+
+  const salaryNet = salaryEvents.reduce((acc, e) => acc + e.amount, 0);
+  const otherIncomeTotal = monthOtherIncome.reduce((acc, e) => acc + e.amount, 0);
+  const totalIncome = salaryNet + otherIncomeTotal;
+  const totalExpenses = monthExpenses.reduce((acc, e) => acc + e.amount, 0);
+  const balance = totalIncome - totalExpenses;
+
+  const todayISOStr = todayISO();
+  const isCurrentMonth = activeMonth === monthKey(todayISOStr);
+  const cashOnHandToday = useMemo(() => {
+    if (!isCurrentMonth) return null;
+    const incomeSoFar = salaryEvents.filter(e => e.date <= todayISOStr).reduce((a, e) => a + e.amount, 0)
+      + monthOtherIncome.filter(e => e.date <= todayISOStr).reduce((a, e) => a + e.amount, 0);
+    const expensesSoFar = monthExpenses.filter(e => e.date <= todayISOStr).reduce((a, e) => a + e.amount, 0);
+    return incomeSoFar - expensesSoFar;
+  }, [isCurrentMonth, salaryEvents, monthOtherIncome, monthExpenses, todayISOStr]);
+
+  const byCategory = useMemo(() => {
+    const map = {};
+    monthExpenses.forEach((e) => { map[e.category] = (map[e.category] || 0) + e.amount; });
+    return Object.entries(map).sort((a, b) => b[1] - a[1]);
+  }, [monthExpenses]);
+  const maxCat = byCategory.length ? byCategory[0][1] : 1;
+
+  const fontSerif = "'Source Serif 4', Georgia, serif";
+  const fontMono = "'IBM Plex Mono', 'Courier New', monospace";
+
+  if (!loaded) {
+    return <div style={{ minHeight: "100vh", background: "#EDE7DA", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: fontMono, color: "#8a8072" }}>загрузка гроссбуха…</div>;
+  }
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#EDE7DA", padding: "32px 12px", fontFamily: fontSerif, color: "#241F19" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,wght@0,400;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+        * { box-sizing: border-box; }
+        input:focus, select:focus { outline: none; }
+        .l-input { background: transparent; border: none; border-bottom: 1px solid #C9C0B2; font-family: 'IBM Plex Mono', monospace; font-size: 14px; padding: 6px 2px; color: #241F19; width: 100%; }
+        .l-input:focus { border-bottom: 1px solid #B4392C; }
+        .btn-stamp { font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.02em; border: 1px solid #241F19; background: transparent; color: #241F19; padding: 9px 14px; cursor: pointer; transition: background 0.15s, color 0.15s; }
+        .btn-stamp:hover { background: #241F19; color: #EDE7DA; }
+        .btn-stamp.red { border-color: #B4392C; color: #B4392C; }
+        .btn-stamp.red:hover { background: #B4392C; color: #F2EDE4; }
+        .btn-stamp.green { border-color: #4C6B4F; color: #4C6B4F; }
+        .btn-stamp.green:hover { background: #4C6B4F; color: #F2EDE4; }
+        .tab { font-family: 'IBM Plex Mono', monospace; font-size: 12px; padding: 6px 10px; cursor: pointer; border-bottom: 2px solid transparent; color: #8a8072; }
+        .tab.active { color: #241F19; border-bottom-color: #B4392C; }
+        .chip { font-family: 'IBM Plex Mono', monospace; font-size: 11px; padding: 5px 10px; border: 1px solid #C9C0B2; color: #8a8072; cursor: pointer; }
+        .chip.active { border-color: #B4392C; color: #B4392C; }
+        .del-x { font-family: 'IBM Plex Mono', monospace; color: #C9C0B2; cursor: pointer; font-size: 13px; background: none; border: none; padding: 0 4px; }
+        .del-x:hover { color: #B4392C; }
+      `}</style>
+
+      <div style={{ maxWidth: 440, margin: "0 auto" }}>
+        <div style={{ textAlign: "center", marginBottom: 4 }}>
+          <div style={{ fontSize: 12, letterSpacing: "0.08em", color: "#8a8072", fontFamily: fontMono, marginBottom: 6 }}>приход / расход</div>
+          <h1 style={{ fontSize: 28, fontWeight: 700, margin: 0, fontStyle: "italic" }}>Гроссбух</h1>
+        </div>
+
+        <div style={{ background: "#F7F3EA", marginTop: 20, boxShadow: "0 1px 0 #C9C0B2, 0 18px 40px -20px rgba(36,31,25,0.35)", position: "relative" }}>
+          <div style={{ height: 10, backgroundImage: "radial-gradient(circle at 8px 5px, #EDE7DA 4px, transparent 4.5px)", backgroundSize: "16px 10px", backgroundColor: "#F7F3EA" }} />
+
+          <div style={{ padding: "8px 24px 24px" }}>
+            <div style={{ display: "flex", gap: 4, borderBottom: "1px solid #C9C0B2", marginBottom: 18, flexWrap: "wrap" }}>
+              {months.map((m) => (<div key={m} className={`tab ${m === activeMonth ? "active" : ""}`} onClick={() => setActiveMonth(m)}>{monthLabel(m)}</div>))}
+            </div>
+
+            {/* summary */}
+            <div style={{ marginBottom: 22, fontFamily: fontMono, fontSize: 12 }}>
+              <Row label="зарплата за месяц (бонусы + проценты)" value={salaryNet} color="#8a8072" />
+              {otherIncomeTotal > 0 && <Row label="прочий доход" value={otherIncomeTotal} color="#8a8072" />}
+              <Row label="доход всего" value={totalIncome} bold />
+              <Row label="расходы" value={-totalExpenses} color="#B4392C" />
+              <div style={{ borderTop: "2px dashed #C9C0B2", marginTop: 8, paddingTop: 10, display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                <span style={{ letterSpacing: "0.04em" }}>БАЛАНС ЗА МЕСЯЦ</span>
+                <span style={{ fontSize: 20, fontWeight: 600, color: balance >= 0 ? "#4C6B4F" : "#B4392C" }}>{formatRUB(balance)}</span>
+              </div>
+              {cashOnHandToday !== null && (
+                <div style={{ marginTop: 10, padding: "10px 12px", background: "#EDE7DA", display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                  <span style={{ color: "#8a8072" }}>на руках сегодня</span>
+                  <span style={{ fontSize: 15, fontWeight: 600, color: cashOnHandToday >= 0 ? "#241F19" : "#B4392C" }}>{formatRUB(cashOnHandToday)}</span>
+                </div>
+              )}
+            </div>
+
+            {/* category breakdown */}
+            {byCategory.length > 0 && (
+              <div style={{ marginBottom: 22 }}>
+                <div style={{ fontFamily: fontMono, fontSize: 11, color: "#8a8072", letterSpacing: "0.05em", marginBottom: 8 }}>ПО КАТЕГОРИЯМ</div>
+                {byCategory.map(([cat, sum]) => (
+                  <div key={cat} style={{ marginBottom: 7 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontFamily: fontMono, fontSize: 12, marginBottom: 3 }}>
+                      <span>{cat}</span><span>{formatRUB(sum)}</span>
+                    </div>
+                    <div style={{ height: 4, background: "#EDE7DA" }}>
+                      <div style={{ height: 4, width: `${(sum / maxCat) * 100}%`, background: "#B4392C" }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* tab switch: add expense / add income */}
+            <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+              <div className={`tab ${tab === "expense" ? "active" : ""}`} onClick={() => setTab("expense")}>+ расход</div>
+              <div className={`tab ${tab === "income" ? "active" : ""}`} onClick={() => setTab("income")}>+ доход</div>
+            </div>
+
+            {tab === "expense" ? (
+              <div style={{ marginBottom: 24 }}>
+                <div style={{ display: "flex", gap: 10, marginBottom: 10, alignItems: "flex-end" }}>
+                  <div style={{ flex: "0 0 118px" }}>
+                    <div style={{ fontSize: 10, color: "#8a8072", fontFamily: fontMono, marginBottom: 2 }}>дата</div>
+                    <input type="date" className="l-input" value={date} onChange={(e) => setDate(e.target.value)} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 10, color: "#8a8072", fontFamily: fontMono, marginBottom: 2 }}>сумма, ₽</div>
+                    <input type="text" inputMode="decimal" placeholder="0" className="l-input" value={amount} onChange={(e) => setAmount(e.target.value)} />
+                  </div>
+                </div>
+                <div style={{ fontSize: 10, color: "#8a8072", fontFamily: fontMono, marginBottom: 6 }}>категория</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+                  {categories.map((c) => (<div key={c} className={`chip ${category === c ? "active" : ""}`} onClick={() => setCategory(c)}>{c}</div>))}
+                  {!addingCat ? (
+                    <div className="chip" onClick={() => setAddingCat(true)}>+ своя</div>
+                  ) : (
+                    <input autoFocus className="l-input" style={{ width: 100 }} placeholder="название" value={newCatInput}
+                      onChange={(e) => setNewCatInput(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") addCategory(); if (e.key === "Escape") { setAddingCat(false); setNewCatInput(""); } }}
+                      onBlur={addCategory} />
+                  )}
+                </div>
+                <input type="text" placeholder="заметка (необязательно)" className="l-input" value={note} onChange={(e) => setNote(e.target.value)} style={{ marginBottom: 12 }} />
+                <button className="btn-stamp red" onClick={addExpense} style={{ width: "100%" }}>записать расход</button>
+              </div>
+            ) : (
+              <div style={{ marginBottom: 24 }}>
+                <div style={{ display: "flex", gap: 10, marginBottom: 10, alignItems: "flex-end" }}>
+                  <div style={{ flex: "0 0 118px" }}>
+                    <div style={{ fontSize: 10, color: "#8a8072", fontFamily: fontMono, marginBottom: 2 }}>дата</div>
+                    <input type="date" className="l-input" value={incDate} onChange={(e) => setIncDate(e.target.value)} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 10, color: "#8a8072", fontFamily: fontMono, marginBottom: 2 }}>сумма, ₽</div>
+                    <input type="text" inputMode="decimal" placeholder="0" className="l-input" value={incAmount} onChange={(e) => setIncAmount(e.target.value)} />
+                  </div>
+                </div>
+                <input type="text" placeholder="источник (подарок, подработка…)" className="l-input" value={incLabel} onChange={(e) => setIncLabel(e.target.value)} style={{ marginBottom: 12 }} />
+                <button className="btn-stamp green" onClick={addOtherIncome} style={{ width: "100%" }}>записать доход</button>
+                <div style={{ fontFamily: fontMono, fontSize: 11, color: "#8a8072", marginTop: 8 }}>
+                  зарплата подтягивается автоматически из «Расчётной ленты»: бонус — в день смены, аванс — в день получения, проценты — одной суммой на зарплату (15-е и последний день месяца)
+                </div>
+              </div>
+            )}
+
+            {/* transaction list */}
+            <div style={{ fontFamily: fontMono, fontSize: 11, color: "#8a8072", letterSpacing: "0.05em", marginBottom: 8 }}>ОПЕРАЦИИ</div>
+            {monthExpenses.length === 0 && monthOtherIncome.length === 0 && salaryEvents.length === 0 ? (
+              <div style={{ fontFamily: fontMono, fontSize: 12, color: "#C9C0B2" }}>— пусто —</div>
+            ) : (
+              [
+                ...monthExpenses.map((e) => ({ ...e, kind: "expense", sortDate: e.date })),
+                ...monthOtherIncome.map((e) => ({ ...e, kind: "income", sortDate: e.date })),
+                ...salaryEvents.map((e) => ({ ...e, sortDate: e.date })),
+              ]
+                .sort((a, b) => a.sortDate.localeCompare(b.sortDate))
+                .map((e) => {
+                  const isExpense = e.kind === "expense";
+                  const isFuture = e.date > todayISOStr;
+                  const label = e.kind === "expense" ? e.category : e.kind === "income" ? e.label : e.label;
+                  const labelColor = isExpense ? "#241F19" : (e.kind === "payday" ? "#8a8072" : "#4C6B4F");
+                  return (
+                    <div key={e.id} style={{ display: "flex", alignItems: "baseline", fontFamily: fontMono, fontSize: 13, padding: "5px 0", borderBottom: "1px dotted #DDD5C4", opacity: isFuture ? 0.55 : 1 }}>
+                      <span style={{ color: "#8a8072", width: 56 }}>{formatDateShort(e.date)}</span>
+                      <span style={{ flex: 1, color: labelColor }}>{label}{e.note ? ` · ${e.note}` : ""}{isFuture ? " · ожидается" : ""}</span>
+                      <span style={{ minWidth: 76, textAlign: "right", color: isExpense ? "#B4392C" : (e.amount < 0 ? "#B4392C" : "#4C6B4F") }}>
+                        {isExpense ? "-" : (e.amount < 0 ? "" : "+")}{formatRUB(e.amount)}
+                      </span>
+                      {(e.kind === "expense" || e.kind === "income") ? (
+                        <button className="del-x" onClick={() => isExpense ? removeExpense(e.id) : removeOtherIncome(e.id)}>✕</button>
+                      ) : (
+                        <span style={{ width: 18 }} />
+                      )}
+                    </div>
+                  );
+                })
+            )}
+          </div>
+          <div style={{ height: 10, backgroundImage: "radial-gradient(circle at 8px 5px, #EDE7DA 4px, transparent 4.5px)", backgroundSize: "16px 10px", backgroundColor: "#F7F3EA" }} />
+        </div>
+
+        <div style={{ textAlign: "center", marginTop: 14, fontFamily: fontMono, fontSize: 11, color: saving ? "#B4392C" : "#8a8072", minHeight: 16 }}>
+          {saving ? "сохранение…" : "сохранено локально"}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Row({ label, value, color, bold }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5, fontWeight: bold ? 600 : 400, color: color || "#241F19" }}>
+      <span>{label}</span>
+      <span>{value < 0 ? "-" : ""}{value === 0 ? "0₽" : (Math.abs(value)).toLocaleString("ru-RU") + "₽"}</span>
+    </div>
+  );
+}
+
+
+ReactDOM.createRoot(document.getElementById("root")).render(<BudgetLedger />);
+</script>
+</body>
+</html>

@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Мои приложения" />
+<title>Мои приложения</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,wght@0,600;0,700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+  * { box-sizing: border-box; }
+  html, body { margin:0; padding:0; background:#1C1A17; min-height:100vh; }
+  body {
+    font-family: 'Source Serif 4', Georgia, serif;
+    color: #F2EDE4;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 32px 16px;
+  }
+  .wrap { max-width: 420px; width: 100%; }
+  h1 { font-size: 26px; font-weight: 700; font-style: italic; margin: 0 0 4px; text-align: center; }
+  .sub { text-align: center; font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.06em; color: #8a8072; margin-bottom: 32px; }
+  a.card {
+    display: block;
+    text-decoration: none;
+    color: inherit;
+    background: #26231F;
+    border: 1px solid #3A362F;
+    border-radius: 10px;
+    padding: 18px 20px;
+    margin-bottom: 14px;
+    transition: border-color 0.15s, transform 0.15s;
+  }
+  a.card:hover, a.card:active { border-color: #B4392C; transform: translateY(-1px); }
+  .card-title { font-size: 19px; font-weight: 600; margin-bottom: 4px; }
+  .card-desc { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #A9A296; line-height: 1.5; }
+  .footer { text-align:center; margin-top: 24px; font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #6b665c; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Мои приложения</h1>
+    <div class="sub">учёт смен, финансов и ассортимента</div>
+
+    <a class="card" href="salary.html">
+      <div class="card-title">📋 Расчётная лента</div>
+      <div class="card-desc">учёт смен, процент с кассы, бонусы, авансы, сравнение по месяцам</div>
+    </a>
+
+    <a class="card" href="budget.html">
+      <div class="card-title">📖 Гроссбух</div>
+      <div class="card-desc">доходы и расходы, зарплата подтягивается автоматически из «Расчётной ленты»</div>
+    </a>
+
+    <a class="card" href="perfume.html">
+      <div class="card-title">🌸 Ароматы на точке</div>
+      <div class="card-desc">учёт ассортимента, закупка, розница, маржа</div>
+    </a>
+
+    <div class="footer">данные хранятся в этом браузере на этом телефоне</div>
+  </div>
+</body>
+</html>
